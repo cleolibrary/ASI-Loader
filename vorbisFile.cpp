@@ -2,9 +2,14 @@
 // Written by Silent
 // Based on ASI Loader by Stanislav "listener" Golovin
 // Initialization part made by NTAuthority
+// Modified by fastman92 to add sorting of ASI files by their name
 
 #include <windows.h>
 #include <iostream>
+
+#include <algorithm>
+#include <deque>
+#include <string>
 
 BYTE 					originalCode[5];
 BYTE* 					originalEP = 0;
@@ -126,9 +131,18 @@ void ExcludedEntriesListFree(ExcludedEntriesList* list)
 	}
 }
 
-void FindFiles(WIN32_FIND_DATA* fd, ExcludedEntriesList* list)
+struct tPluginToBeLoaded
 {
-	HANDLE asiFile = FindFirstFile ("*.asi", fd);
+	std::string dirPath;
+	std::string pluginFilename;
+};
+
+void FindFiles(std::deque<tPluginToBeLoaded>& pluginPaths, WIN32_FIND_DATAA* fd, ExcludedEntriesList* list)
+{
+	char curDir[MAX_PATH];
+	GetCurrentDirectoryA(_countof(curDir), curDir);
+
+	HANDLE asiFile = FindFirstFileA ("*.asi", fd);
 	if (asiFile != INVALID_HANDLE_VALUE)
 	{
 
@@ -143,19 +157,25 @@ void FindFiles(WIN32_FIND_DATA* fd, ExcludedEntriesList* list)
 					(fd->cFileName[pos-2] == 's' || fd->cFileName[pos-2] == 'S') &&
 					(fd->cFileName[pos-1] == 'i' || fd->cFileName[pos-1] == 'I'))
 				{
-					if ( !list || !ExcludedEntriesListHasEntry(list, fd->cFileName) )
-						LoadLibrary (fd->cFileName);
+					if (!list || !ExcludedEntriesListHasEntry(list, fd->cFileName))
+					{
+						tPluginToBeLoaded plugin;
+						plugin.dirPath = curDir;
+						plugin.pluginFilename = fd->cFileName;
+
+						pluginPaths.push_back(plugin);
+					}
 				}
 			}
 
-		} while (FindNextFile (asiFile, fd));
+		} while (FindNextFileA (asiFile, fd));
 		FindClose (asiFile);
 	}
 }
 
 void LoadPlugins()
 {
-	HMODULE vorbisHooked = LoadLibrary ("vorbishooked");
+	HMODULE vorbisHooked = LoadLibraryA ("vorbishooked");
 	if ( vorbisHooked )
 	{
 		__ov_open_callbacks = GetProcAddress (vorbisHooked, "ov_open_callbacks");
@@ -168,14 +188,16 @@ void LoadPlugins()
 		__ov_time_seek_page = GetProcAddress (vorbisHooked, "ov_time_seek_page");
 
 		// Regular ASI Loader
-        WIN32_FIND_DATA fd;
+        WIN32_FIND_DATAA fd;
+		std::deque<tPluginToBeLoaded> pluginsToBeLoaded;
+
 		char			moduleName[MAX_PATH];
 		char			preparedPath[128];	// stores scripts\*exename*\settings.ini
 		char*			tempPointer;
 		int 			nWantsToLoadPlugins;
 		int				nThatExeWantsPlugins;
 
-		GetModuleFileName(NULL, moduleName, MAX_PATH);
+		GetModuleFileNameA(NULL, moduleName, MAX_PATH);
 		tempPointer = strrchr(moduleName, '.');
 		*tempPointer  = '\0';
 
@@ -185,9 +207,9 @@ void LoadPlugins()
 		strcat(preparedPath, "\\settings.ini");
 
 		// Before we load any ASI files, let's see if user wants to do it at all
-		nWantsToLoadPlugins = GetPrivateProfileInt("globalsets", "loadplugins", TRUE, "scripts\\global.ini");
+		nWantsToLoadPlugins = GetPrivateProfileIntA("globalsets", "loadplugins", TRUE, "scripts\\global.ini");
 		// Or perhaps this EXE wants to override global settings?
-		nThatExeWantsPlugins = GetPrivateProfileInt("exclusivesets", "loadplugins", -1, preparedPath);
+		nThatExeWantsPlugins = GetPrivateProfileIntA("exclusivesets", "loadplugins", -1, preparedPath);
 
 		if ( nThatExeWantsPlugins )	// Will not process only if this EXE wishes not to load anything but its exclusive plugins
 		{
@@ -223,17 +245,17 @@ void LoadPlugins()
 
 					fclose(iniFile);
 				}
-				FindFiles(&fd, &excludes);
-				if ( SetCurrentDirectory("scripts\\") )
+				FindFiles(pluginsToBeLoaded, &fd, &excludes);
+				if ( SetCurrentDirectoryA("scripts\\") )
 				{
-					FindFiles(&fd, &excludes);
-					if ( SetCurrentDirectory(tempPointer + 1) )
+					FindFiles(pluginsToBeLoaded, &fd, &excludes);
+					if ( SetCurrentDirectoryA(tempPointer + 1) )
 					{
-						FindFiles(&fd, NULL);	// Exclusive plugins are not being excluded
-						SetCurrentDirectory("..\\..\\");
+						FindFiles(pluginsToBeLoaded, &fd, NULL);	// Exclusive plugins are not being excluded
+						SetCurrentDirectoryA("..\\..\\");
 					}
 					else
-						SetCurrentDirectory("..\\");
+						SetCurrentDirectoryA("..\\");
 				}
 
 				// Free the remaining excludes
@@ -246,11 +268,22 @@ void LoadPlugins()
 			// We need to cut settings.ini from the path again
 			tempPointer = strrchr(preparedPath, '\\');
 			tempPointer[1] = '\0';
-			if ( SetCurrentDirectory(preparedPath) )
+			if ( SetCurrentDirectoryA(preparedPath) )
 			{
-				FindFiles(&fd, NULL);
-				SetCurrentDirectory("..\\..\\");
+				FindFiles(pluginsToBeLoaded, &fd, NULL);
+				SetCurrentDirectoryA("..\\..\\");
 			}
+		}
+
+		// Load ASI plugins
+		std::sort(pluginsToBeLoaded.begin(), pluginsToBeLoaded.end(), [](tPluginToBeLoaded& a, tPluginToBeLoaded& b) { return a.pluginFilename < b.pluginFilename; });
+
+		for (auto& plugin : pluginsToBeLoaded)
+		{
+			char pluginPath[MAX_PATH];
+			sprintf(pluginPath, "%s\\%s", plugin.dirPath.c_str(), plugin.pluginFilename.c_str());
+			// MessageBoxA(NULL, pluginPath, "Test", MB_OK);
+			LoadLibraryA(pluginPath);
 		}
 	}
 
